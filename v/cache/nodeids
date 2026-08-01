@@ -1,0 +1,12 @@
+[
+  "tests/test_career_core.py::test_education_hard_gap_caps_score",
+  "tests/test_career_core.py::test_extract_docx_resume",
+  "tests/test_career_core.py::test_extract_job_requirements_separates_must_and_preferred",
+  "tests/test_career_core.py::test_interview_scoring_rewards_star_and_evidence",
+  "tests/test_career_core.py::test_match_score_uses_evidence_and_not_probability",
+  "tests/test_career_core.py::test_missing_core_skill_is_reported",
+  "tests/test_career_core.py::test_resume_size_limit",
+  "tests/test_career_core.py::test_short_job_description_is_rejected",
+  "tests/test_career_core.py::test_top_three_skills_prioritize_repeated_core_gaps",
+  "tests/test_storage.py::test_application_lifecycle"
+]
