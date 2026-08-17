@@ -8,7 +8,19 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-APP_VERSION = "1.0"
+from knowledge_base import (
+    EXTRA_SKILL_TAXONOMY,
+    INTERVIEW_QUESTION_BANK,
+    JD_GREEN_FLAGS,
+    JD_RED_FLAGS,
+    LEARNING_PATHS,
+    find_role_playbook,
+    learning_path_for,
+    salary_for_role,
+    skill_effort,
+)
+
+APP_VERSION = "1.1"
 MAX_RESUME_BYTES = 8 * 1024 * 1024
 
 EDUCATION_RANK = {"不限": 0, "大专": 1, "本科": 2, "硕士": 3, "博士": 4}
@@ -54,6 +66,8 @@ SKILL_TAXONOMY: dict[str, tuple[str, ...]] = {
     "Docker": ("docker", "容器化"),
     "云计算": ("云计算", "aws", "azure", "阿里云", "腾讯云"),
 }
+# 合并扩充技能词表，覆盖更多岗位与场景。
+SKILL_TAXONOMY.update(EXTRA_SKILL_TAXONOMY)
 
 PREFERRED_MARKERS = ("优先", "加分", "最好", "熟悉更佳", "有经验者", "plus")
 MUST_MARKERS = ("必须", "要求", "具备", "熟练", "掌握", "能够", "负责", "任职资格")
@@ -393,12 +407,17 @@ def generate_interview_questions(profile: ResumeProfile, job: JobRequirements, g
         f"请用 90 秒介绍自己，并说明为什么适合{job.title}。",
         "选一个最能代表你的项目，用 STAR 结构说明目标、你的具体行动和量化结果。",
         "讲一次你在信息不完整或时间紧张时推进任务的经历，你如何做取舍？",
-        "如果入职后两周内要交付第一个成果，你会如何拆解和安排？",
     ]
+    playbook = find_role_playbook(f"{job.title} {' '.join(job.responsibilities)}")
+    if playbook:
+        questions.extend(playbook["interview_questions"][:4])
+    questions.extend(INTERVIEW_QUESTION_BANK["行为面试(STAR)"][:2])
+    questions.extend(INTERVIEW_QUESTION_BANK["情景/压力题"][:1])
     questions.extend(f"岗位强调{skill}，请说明你的理解，并给出一个真实使用场景。" for skill in gaps[:3])
     if job.responsibilities:
         questions.append(f"针对“{job.responsibilities[0]}”，你会如何制定第一周的行动计划？")
-    return unique(questions)[:8]
+    questions.append("你对我们公司或这个岗位还有什么想了解的吗？")
+    return unique(questions)[:12]
 
 
 def generate_pitch(profile: ResumeProfile, job: JobRequirements, matched: list[str]) -> str:
@@ -452,19 +471,41 @@ def analyze_match(profile: ResumeProfile, job: JobRequirements) -> MatchAnalysis
     if matched:
         evidence.append(f"已覆盖核心技能：{'、'.join(matched[:6])}")
     if job.education != "不限":
-        evidence.append(f"学历要求为{job.education}及对应口径，当前填写为{profile.education or '未填写'}")
+        gap = (
+            "已达标"
+            if profile.education and _education_score(profile.education, job.education) == 100
+            else "未达标或未填写"
+        )
+        evidence.append(f"学历要求：{job.education}（当前：{profile.education or '未填写'}）→ {gap}")
     if job.min_years:
-        evidence.append(f"岗位要求约{job.min_years:g}年经验，当前填写为{profile.experience_years:g}年")
+        evidence.append(
+            f"经验要求：约 {job.min_years:g} 年（当前：{profile.experience_years:g} 年）→ "
+            f"{'达标' if experience_score == 100 else '有差距'}"
+        )
     if not job.must_skills:
         evidence.append("岗位描述中没有识别到明确技能词，技能项按保守分值处理")
 
+    # 补充缺口优先级（快速 / 中等 / 较长）
+    if missing:
+        ranked = sorted(missing, key=lambda s: {"快速": 0, "中等": 1, "较长": 2}.get(skill_effort(s), 1))
+        evidence.append(
+            "技能缺口优先级（按补齐成本）："
+            + "；".join(f"{skill}（{skill_effort(skill)}）" for skill in ranked[:5])
+        )
+    playbook = find_role_playbook(f"{job.title} {' '.join(job.responsibilities)}")
+    if playbook:
+        evidence.append(
+            f"岗位画像：{playbook['summary']} 发展路径：{playbook['career_path']}"
+        )
+
     next_actions = []
     if missing:
-        next_actions.append(f"先用一个小项目验证并补齐：{'、'.join(missing[:3])}")
+        next_actions.append(f"优先补齐{'、'.join(missing[:3])}（先做一个可验证的小项目）")
     next_actions.extend(
         [
             "按岗位关键词重排简历，只保留可验证的能力证据",
             "准备 3 个 STAR 故事：成果、协作、失败复盘",
+            "把缺失技能写进 30 天学习计划并产出作品",
             "投递后 3—5 个工作日记录反馈并决定是否跟进",
         ]
     )
@@ -583,12 +624,113 @@ def top_skill_priorities(
 
 
 def learning_plan(skill: str) -> list[str]:
+    if skill in LEARNING_PATHS:
+        return LEARNING_PATHS[skill]
     return [
-        f"第1周：完成{skill}基础课程或官方教程，并整理一页知识地图。",
+        f"第1周：完成{skill}的基础课程或官方教程，整理一页知识地图。",
         f"第2周：做一个与目标岗位相关的{skill}小项目，保留过程记录。",
         "第3周：把项目改写成 STAR 经历，补充数据、截图或可访问成果。",
-        "第4周：完成两轮模拟面试，并将反馈更新到简历与答案库。",
+        "第4周：完成两轮模拟面试，并把反馈更新到简历与答案库。",
     ]
+
+
+def role_reference(job: JobRequirements) -> dict[str, Any] | None:
+    """返回岗位画像与薪资参考，供界面展示。"""
+    playbook = find_role_playbook(f"{job.title} {' '.join(job.responsibilities)}")
+    if not playbook:
+        return None
+    return {
+        "role": playbook,
+        "salary": salary_for_role(f"{job.title} {' '.join(job.responsibilities)}"),
+    }
+
+
+def generate_cover_letter(profile: ResumeProfile, job: JobRequirements, matched: list[str], missing: list[str]) -> str:
+    """生成一封结构完整的求职信草稿（中文）。"""
+    identity = (
+        "、".join(value for value in [profile.school, profile.major, profile.education] if value)
+        or "相关专业背景"
+    )
+    ability = "、".join(matched[:3]) or "快速学习与沟通协作"
+    proof = profile.highlights[0] if profile.highlights else "在课程、项目或实习中完成了从分析到交付的完整闭环"
+    gap_line = (
+        f"针对岗位目前我仍在补强的{('、'.join(missing[:3]))}，我已经制定并开始执行对应的学习与项目计划。"
+        if missing
+        else "我对岗位核心任务所需的技能已有对应积累。"
+    )
+    return (
+        f"尊敬的招聘负责人：\n\n"
+        f"您好！我是{profile.name or '候选人'}，{identity}。我看到贵司正在招聘「{job.title}」，"
+        f"在仔细研读岗位职责后，认为自己的经历与能力与该岗位较为匹配，特此申请。\n\n"
+        f"【我能带来的价值】我最相关的核心能力是{ability}。{proof}。"
+        f"这与岗位要求的“{job.responsibilities[0] if job.responsibilities else '核心职责'}”高度对应，"
+        f"我相信能够较快上手并为团队产出可衡量的结果。\n\n"
+        f"【为什么是贵司】我对贵司所在的业务方向持续关注，认同用结果说话、注重协作与成长的文化，"
+        f"希望能在这样的环境中把已有经验转化为实际贡献。\n\n"
+        f"【关于差距与计划】{gap_line}\n\n"
+        f"期待有机会进一步沟通，也欢迎随时安排面试。感谢您的时间！\n\n"
+        f"此致\n敬礼！\n\n{profile.name or '候选人'}"
+    )
+
+
+def rewrite_bullets(profile: ResumeProfile, job: JobRequirements, matched: list[str]) -> list[str]:
+    """把候选人的成果改写成 STAR 结构的简历要点草稿。"""
+    bullets: list[str] = []
+    role = job.title or "目标岗位"
+    for highlight in profile.highlights[:3]:
+        bullets.append(
+            f"【动作】围绕{role}的核心任务，主导/参与{highlight}；"
+            f"【方法】结合{'、'.join(matched[:2]) or '相关工具与方法'}；"
+            f"【结果】给出可验证的数据或交付物（补充具体数字、覆盖范围或周期）。"
+        )
+    if not profile.highlights:
+        bullets.append(
+            f"【动作】针对{role}的核心职责，完成一个端到端项目；"
+            f"【方法】使用{'、'.join(matched[:3]) or '相关技能'}；"
+            f"【结果】量化成果（如效率、准确率、覆盖用户数、交付周期）。"
+        )
+    bullets.append(
+        "通用模板：在 [时间/场景] 中，我通过 [具体动作 + 工具/方法]，"
+        "实现了 [可验证结果]，并沉淀了 [方法/复盘]，可迁移到本岗位的 [对应职责]。"
+    )
+    return bullets[:5]
+
+
+def generate_model_answer(question: str, profile: ResumeProfile, job: JobRequirements) -> str:
+    """为一道面试题生成 STAR 示范回答骨架（需要候选人填入真实经历）。"""
+    evidence = profile.highlights[0] if profile.highlights else "（填入你真实的项目/实习成果，附上数字）"
+    return (
+        f"【结论】一句话直接回答：我具备/会这样做，因为我曾{evidence}。\n"
+        f"【背景】当时的目标是（交代时间、团队、要解决的问题）。\n"
+        f"【行动】我具体做了三件事：1）…；2）…；3）…（强调“我”的动作，而非团队泛述）。\n"
+        f"【结果】最终带来（量化结果：效率/准确率/覆盖/成本）的变化，并从中学到（复盘）。\n"
+        f"【迁移】这段经历与{job.title}的“{job.responsibilities[0] if job.responsibilities else '核心职责'}”"
+        f"直接相关，因此我有信心快速上手。"
+    )
+
+
+def jd_health_check(job_text: str) -> dict[str, list[str]]:
+    """对 JD 做风险体检，返回命中的风险项与加分项。"""
+    value = clean_text(job_text)
+    red: list[str] = []
+    keyword_map = {
+        "付费陷阱": ("培训费", "押金", "服装费", "保证金", "先交钱", "付费"),
+        "外包/培训贷": ("培训后上岗", "贷款培训", "包就业", "培训贷", "岗前培训收费"),
+        "薪资倒挂": ("面议", "薪资面议", "待遇从优", "工资面议"),
+        "信息缺失": (),
+    }
+    for title, _desc in JD_RED_FLAGS:
+        for keyword in keyword_map.get(title, ()):
+            if keyword in value:
+                red.append(f"{title}：{dict(JD_RED_FLAGS)[title]}")
+                break
+    # 通用长度与结构判断
+    if len(value) < 120:
+        red.append("信息过简：JD 过短，关键信息（职责/要求/薪资）缺失。")
+    if "薪资" not in value and "待遇" not in value and "工资" not in value and "薪酬" not in value:
+        red.append("薪资未明确：建议投递前主动确认薪酬范围。")
+    red = unique(red)
+    return {"red": red, "green": list(JD_GREEN_FLAGS)}
 
 
 def analysis_to_json(profile: ResumeProfile, job: JobRequirements, analysis: MatchAnalysis) -> str:

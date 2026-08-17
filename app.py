@@ -30,11 +30,23 @@ from career_core import (
     analyze_match,
     extract_job_requirements,
     extract_resume_text,
+    generate_cover_letter,
+    generate_model_answer,
     infer_resume_profile,
+    jd_health_check,
+    rewrite_bullets,
+    role_reference,
     score_interview_answer,
     split_terms,
     top_skill_priorities,
     unique,
+)
+from knowledge_base import (
+    INTERVIEW_QUESTION_BANK,
+    ROLE_PLAYBOOK,
+    SALARY_REFERENCE,
+    find_role_playbook,
+    salary_for_key,
 )
 from storage import (
     STATUSES,
@@ -288,23 +300,70 @@ def render_rule_results(profile: ResumeProfile, job: JobRequirements, analysis: 
             _pills(job.preferred_skills)
             for item in job.responsibilities or ["未从文本中识别到清晰的职责句，请人工阅读原文。"]:
                 st.markdown(f"- {item}")
+        ref = role_reference(job)
+        if ref:
+            playbook = ref["role"]
+            st.divider()
+            st.markdown("#### 岗位画像与参考")
+            st.markdown(f"**画像**：{playbook['summary']}")
+            st.markdown(f"**职业发展路径**：{playbook['career_path']}")
+            left_ref, right_ref = st.columns(2)
+            with left_ref:
+                st.markdown("**典型职责**")
+                for item in playbook["responsibilities"]:
+                    st.markdown(f"- {item}")
+            with right_ref:
+                st.markdown("**入门建议**")
+                for item in playbook["entry_tips"]:
+                    st.markdown(f"- {item}")
+            bands = ref["salary"]
+            if bands:
+                st.markdown("**薪资参考（月薪，方向性参考，需结合城市/行业/公司规模校准）**")
+                for band in bands:
+                    st.markdown(f"- {band['band']}：一线 {band['tier1']} ｜ 二线 {band['tier2']}")
 
     with tab_resume:
         st.markdown("#### 逐条修改建议")
         for index, item in enumerate(analysis.resume_suggestions, 1):
             st.markdown(f"**{index}.** {item}")
         st.warning("只改写真实发生过的经历。缺失能力应先学习并产出作品，再写进简历。")
+        st.markdown("#### STAR 改写草稿")
+        for index, item in enumerate(rewrite_bullets(profile, job, analysis.matched_skills), 1):
+            st.markdown(f"**{index}.** {item}")
         st.markdown("#### 90 秒自我介绍草稿")
         st.text_area("可复制后继续修改", value=analysis.pitch, height=150, key="pitch_output")
+        st.markdown("#### 求职信草稿")
+        cover = generate_cover_letter(profile, job, analysis.matched_skills, analysis.missing_skills)
+        st.text_area("可复制后继续修改", value=cover, height=320, key="cover_output")
 
     with tab_interview:
         for index, question in enumerate(analysis.interview_questions, 1):
             st.markdown(f"**Q{index}.** {question}")
         st.caption("可前往“面试训练”模块逐题作答并评分。")
+        st.divider()
+        st.markdown("#### 示范回答骨架")
+        demo_q = st.selectbox("选择题目查看 STAR 示范", analysis.interview_questions, key="demo_question")
+        st.text_area(
+            "STAR 示范（请替换为你的真实经历）",
+            value=generate_model_answer(demo_q, profile, job),
+            height=260,
+            key="model_answer_output",
+        )
 
     with tab_action:
         for index, action in enumerate(analysis.next_actions, 1):
             st.checkbox(action, key=f"action_{index}_{job.title}_{analysis.score}")
+        st.divider()
+        st.markdown("#### JD 质量体检")
+        health = jd_health_check(job.source_text)
+        if health["red"]:
+            for item in health["red"]:
+                st.warning(item)
+        else:
+            st.success("未命中常见风险信号（仍建议自行核实公司资质与薪资范围）。")
+        with st.expander("投递前可对照核验的加分项"):
+            for item in health["green"]:
+                st.markdown(f"- {item}")
         report = analysis_to_json(profile, job, analysis)
         st.download_button(
             "下载本次分析 JSON",
@@ -345,13 +404,31 @@ def render_rule_results(profile: ResumeProfile, job: JobRequirements, analysis: 
                 st.markdown(f"- {item}")
             c1, c2 = st.columns(2)
             with c1:
-                st.markdown("#### 简历改写")
+                st.markdown("#### 匹配证据")
+                for item in ai_result.matched_evidence:
+                    st.markdown(f"- {item}")
+                st.markdown("#### 简历改写建议")
                 for item in ai_result.resume_rewrites:
                     st.markdown(f"- {item}")
             with c2:
+                st.markdown("#### 能力差距")
+                for item in ai_result.capability_gaps:
+                    st.markdown(f"- {item}")
                 st.markdown("#### 30 天计划")
                 for item in ai_result.thirty_day_plan:
                     st.markdown(f"- {item}")
+            st.markdown("#### STAR 改写要点")
+            for item in ai_result.rewritten_bullets:
+                st.markdown(f"- {item}")
+            st.markdown("#### AI 补充面试题")
+            for item in ai_result.interview_questions:
+                st.markdown(f"- {item}")
+            st.markdown("#### AI 求职信草稿")
+            st.text_area("可复制后继续修改", value=ai_result.cover_letter, height=280, key="ai_cover_output")
+            if ai_result.caveats:
+                st.markdown("#### 注意事项")
+                for item in ai_result.caveats:
+                    st.caption(f"- {item}")
 
 
 def render_analysis_page() -> None:
@@ -548,6 +625,93 @@ def render_skill_radar_page() -> None:
     st.bar_chart(summary.set_index("岗位")[["匹配信号"]], color="#3157D5")
 
 
+def render_toolbox_page() -> None:
+    st.markdown('<div class="cp-kicker">06 · 求职工具箱</div>', unsafe_allow_html=True)
+    st.header("岗位画像、薪资、面试题与求职材料，一站查")
+    st.caption("以下为参考信息，用于拓宽认知与准备；具体以目标岗位 JD 与招聘平台实时数据为准。")
+
+    tab_role, tab_salary, tab_questions, tab_docs, tab_jd = st.tabs(
+        ["岗位参考库", "薪资参考", "面试题库", "求职材料", "JD 体检"]
+    )
+
+    with tab_role:
+        role_names = list(ROLE_PLAYBOOK.keys())
+        selected_role = st.selectbox("选择岗位", role_names)
+        playbook = ROLE_PLAYBOOK[selected_role]
+        st.markdown(f"### {selected_role}")
+        st.markdown(f"**画像**：{playbook['summary']}")
+        st.markdown(f"**职业发展路径**：{playbook['career_path']}")
+        c1, c2 = st.columns(2)
+        with c1:
+            st.markdown("**核心职责**")
+            for item in playbook["responsibilities"]:
+                st.markdown(f"- {item}")
+            st.markdown("**必备技能**")
+            _pills(playbook["must_skills"])
+            st.markdown("**加分技能**")
+            _pills(playbook["preferred_skills"], gap=True)
+        with c2:
+            st.markdown("**常见面试题**")
+            for item in playbook["interview_questions"]:
+                st.markdown(f"- {item}")
+            st.markdown("**入门建议**")
+            for item in playbook["entry_tips"]:
+                st.markdown(f"- {item}")
+
+    with tab_salary:
+        role_for_salary = st.selectbox("选择岗位", list(SALARY_REFERENCE.keys()), key="salary_role")
+        tier = st.radio("城市等级", ["一线", "二线"], horizontal=True)
+        bands = salary_for_key(role_for_salary) or []
+        st.markdown("### 薪资参考区间（月薪）")
+        for band in bands:
+            value = band["tier1"] if tier == "一线" else band["tier2"]
+            st.markdown(f"- **{band['band']}**：{value}")
+        st.caption("以上为方向性参考，随城市、行业、公司规模与个人能力浮动，投递前以招聘平台实时数据为准。")
+
+    with tab_questions:
+        category = st.selectbox("问题类型", list(INTERVIEW_QUESTION_BANK.keys()))
+        for question in INTERVIEW_QUESTION_BANK[category]:
+            st.markdown(f"- {question}")
+        st.caption("把每题都准备成 STAR 结构，面试时更从容。")
+
+    with tab_docs:
+        profile = st.session_state.get("current_profile")
+        job = st.session_state.get("current_job")
+        analysis = st.session_state.get("current_analysis")
+        if not profile or not job or not analysis:
+            st.info("请先在「匹配分析」完成一次分析，即可在这里生成求职信与简历改写。")
+        else:
+            st.markdown("#### STAR 简历改写草稿")
+            for index, item in enumerate(rewrite_bullets(profile, job, analysis.matched_skills), 1):
+                st.markdown(f"**{index}.** {item}")
+            st.markdown("#### 求职信草稿")
+            st.text_area(
+                "可复制后继续修改",
+                value=generate_cover_letter(profile, job, analysis.matched_skills, analysis.missing_skills),
+                height=320,
+                key="toolbox_cover",
+            )
+            st.markdown("#### 90 秒自我介绍")
+            st.text_area("可复制后继续修改", value=analysis.pitch, height=150, key="toolbox_pitch")
+
+    with tab_jd:
+        jd_text = st.text_area("粘贴岗位 JD 进行体检", height=260, key="toolbox_jd")
+        if st.button("开始体检", width="stretch"):
+            if len(jd_text.strip()) < 30:
+                st.warning("JD 过短，请粘贴完整内容。")
+            else:
+                health = jd_health_check(jd_text)
+                if health["red"]:
+                    st.markdown("#### 风险信号")
+                    for item in health["red"]:
+                        st.warning(item)
+                else:
+                    st.success("未命中常见风险信号（仍需自行核实公司资质与薪资范围）。")
+                with st.expander("投递前可对照核验的加分项"):
+                    for item in health["green"]:
+                        st.markdown(f"- {item}")
+
+
 def render_settings_page() -> None:
     st.markdown('<div class="cp-kicker">设置 · 隐私</div>', unsafe_allow_html=True)
     st.header("AI 是增强项，不是产品的单点依赖")
@@ -585,7 +749,7 @@ def main() -> None:
 
     page = st.segmented_control(
         "功能导航",
-        ["匹配分析", "面试训练", "投递看板", "能力雷达", "设置与隐私"],
+        ["匹配分析", "面试训练", "求职工具箱", "投递看板", "能力雷达", "设置与隐私"],
         default="匹配分析",
         selection_mode="single",
         label_visibility="collapsed",
@@ -593,6 +757,8 @@ def main() -> None:
     st.divider()
     if page == "面试训练":
         render_interview_page()
+    elif page == "求职工具箱":
+        render_toolbox_page()
     elif page == "投递看板":
         render_tracker_page()
     elif page == "能力雷达":
